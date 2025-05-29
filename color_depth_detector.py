@@ -7,6 +7,7 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 import message_filters # 用于同步图像话题
 
+
 # --- 配置参数 ---
 # 定义要识别的颜色范围 (HSV)
 # 示例：识别红色 (你需要根据实际情况调整这些值)
