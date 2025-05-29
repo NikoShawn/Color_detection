@@ -41,17 +41,17 @@ class DepthOfRed:
         self.position = None
 
         # 等待首次里程计数据
-        rospy.loginfo("Waiting for initial odometry...")
-        while not rospy.is_shutdown() and self.current_pose is None:
-            rospy.sleep(0.1)
-        rospy.loginfo("Odometry ready!")
+        # rospy.loginfo("Waiting for initial odometry...")
+        # while not rospy.is_shutdown() and self.current_pose is None:
+        #     rospy.sleep(0.1)
+        # rospy.loginfo("Odometry ready!")
 
         # 使用 ApproximateTimeSynchronizer 来同步具有相似时间戳的消息
         # 调整 slop 参数（以秒为单位）以允许时间戳之间的一些差异
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.color_sub, self.depth_sub], 
             queue_size=10, 
-            slop=0.1  # 0.1 秒的容差
+            slop=0.2  # 0.1 秒的容差
         )
         self.ts.registerCallback(self.callback)
         # rospy.loginfo("订阅了颜色和深度图像话题，并同步它们。")
@@ -162,24 +162,58 @@ class DepthOfRed:
 
         # 定义红色的 HSV 范围
         # 这些值可能需要根据您的具体照明条件和相机进行调整
-        lower_red1 = np.array([0, 70, 50])
-        upper_red1 = np.array([5, 255, 255])
-        lower_red2 = np.array([180, 70, 50])
-        upper_red2 = np.array([180, 255, 255])
+        lower_red1 = np.array([0, 100, 100])
+        upper_red1 = np.array([10, 255, 255])
 
         # 将 BGR 图像转换为 HSV
         hsv_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2HSV)
 
-        # 创建红色区域的掩码
+        # 创建红色区域的掩码，只使用mask1
         mask1 = cv2.inRange(hsv_image, lower_red1, upper_red1)
-        mask2 = cv2.inRange(hsv_image, lower_red2, upper_red2)
-        red_mask = cv2.bitwise_or(mask1, mask2)
+        
+        # 对mask进行滤波处理，去除杂点
+        # 1. 形态学操作：先开运算（去除小噪点），再闭运算（填充小洞）
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask1 = cv2.morphologyEx(mask1, cv2.MORPH_OPEN, kernel, iterations=2)
+        mask1 = cv2.morphologyEx(mask1, cv2.MORPH_CLOSE, kernel, iterations=2)
+        
+        # 2. 高斯模糊
+        mask1 = cv2.GaussianBlur(mask1, (5, 5), 0)
+        
+        # 3. 重新二值化
+        _, mask1 = cv2.threshold(mask1, 127, 255, cv2.THRESH_BINARY)
+        
+        # 4. 使用连通组件分析，仅当最大区域的面积大于等于阈值时，才保留该最大区域
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask1, connectivity=8)
+        min_area = 1000  # 最小面积阈值，可以根据需要调整
+        
+        output_mask = np.zeros_like(mask1) # 初始化一个空掩码
+
+        if num_labels > 1:  # 确保至少有一个前景组件 (标签0是背景)
+            # stats[0] 对应背景。我们关注前景组件 stats[1:]
+            # 获取所有前景组件的面积
+            foreground_areas = stats[1:, cv2.CC_STAT_AREA]
+            
+            # 找到前景组件中的最大面积
+            max_foreground_area = np.max(foreground_areas)
+            
+            # 如果这个最大面积大于等于设定的最小面积阈值
+            if max_foreground_area >= min_area:
+                # 找到最大面积对应的组件的标签
+                # np.argmax(foreground_areas) 返回在 foreground_areas 中的索引
+                # 由于 foreground_areas 是从 stats[1:] 开始的，所以实际标签值是索引 + 1
+                largest_component_label = np.argmax(foreground_areas) + 1
+                
+                # 在输出掩码中只保留这个最大的且符合条件的区域
+                output_mask[labels == largest_component_label] = 255
+        
+        mask1 = output_mask # 更新 mask1
 
         # 查找红色像素的坐标
-        red_pixel_coordinates = np.argwhere(red_mask > 0) # 返回 (row, col) 形式的索引
+        red_pixel_coordinates = np.argwhere(mask1 > 0) # 返回 (row, col) 形式的索引
 
         if red_pixel_coordinates.size > 0:
-            rospy.loginfo(f"检测到 {len(red_pixel_coordinates)} 个红色像素。")
+            # rospy.loginfo(f"检测到 {len(red_pixel_coordinates)} 个红色像素。")
             valid_depths = []
             valid_3d_points = []
             
@@ -203,7 +237,7 @@ class DepthOfRed:
             
             if valid_depths:
                 average_depth = np.mean(valid_depths)
-                rospy.loginfo(f"检测到的红色区域的平均深度: {average_depth}mm")
+                # rospy.loginfo(f"检测到的红色区域的平均深度: {average_depth}mm")
                 
                 if valid_3d_points:
                     # 计算平均三维坐标
@@ -223,10 +257,10 @@ class DepthOfRed:
             self.camera_coords = None
 
         # （可选）显示图像以进行调试
-        # cv2.imshow("Color Image", color_image)
+        cv2.imshow("Color Image", color_image)
         # cv2.imshow("Depth Image", depth_image) # 归一化以便显示
-        # cv2.imshow("Red Mask", red_mask)
-        # cv2.waitKey(1)
+        # cv2.imshow("Red Mask", mask1)
+        cv2.waitKey(1)
 
     def get_camera_coords(self):
         """获取最新的相机坐标"""
@@ -254,16 +288,16 @@ if __name__ == '__main__':
             dor.camera_coords_pub.publish(camera_point)
             
             world_point = dor.transform_to_world(camera_coords)
-            rospy.loginfo(f"相机坐标系下的点: {camera_coords}")
+            # rospy.loginfo(f"相机坐标系下的点: {camera_coords}")
             if world_point is not None:
                 # 发布世界坐标
                 dor.world_coords_pub.publish(world_point)
-                rospy.loginfo(f"世界坐标系下的点: ({world_point.point.x:.3f}, {world_point.point.y:.3f}, {world_point.point.z:.3f})")
+                # rospy.loginfo(f"世界坐标系下的点: ({world_point.point.x:.3f}, {world_point.point.y:.3f}, {world_point.point.z:.3f})")
         else:
             rospy.loginfo("暂无检测到的红色物体")
     
     # 创建定时器，每秒打印一次坐标信息
-    timer = rospy.Timer(rospy.Duration(1.0), lambda event: print_coordinates())
+    timer = rospy.Timer(rospy.Duration(0.05), lambda event: print_coordinates())
     
     try:
         rospy.spin()
