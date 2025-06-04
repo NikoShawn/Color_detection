@@ -17,8 +17,8 @@ class ColorDetection:
         self.bridge = CvBridge()
         
         # 红色范围定义
-        self.lower_red = np.array([0, 100, 100])     # 红色范围低阈值
-        self.upper_red = np.array([10, 255, 255])    # 红色范围高阈值
+        self.lower_red = np.array([156, 100, 100])     # 红色范围低阈值
+        self.upper_red = np.array([180, 255, 255])    # 红色范围高阈值
         
         # 字体设置
         self.font = cv2.FONT_HERSHEY_SIMPLEX
@@ -195,7 +195,7 @@ class ColorDetection:
         
         for cnt in contours_red:
             area = cv2.contourArea(cnt)
-            if area > 500 and area > max_area:  # 过滤掉太小的区域并找到最大面积
+            if area > 1000 and area > max_area:  # 过滤掉太小的区域并找到最大面积
                 max_area = area
                 largest_contour = cnt
         
@@ -219,6 +219,34 @@ class ColorDetection:
                 if depth_value_mm > 0:
                     depth_value_m = depth_value_mm / 1000.0  # 转换为米
                     depth_text = f"Depth: {depth_value_m:.2f}m"
+
+                    # 调用pixel_to_3d获取相机坐标
+                    camera_coords_tuple = self.pixel_to_3d(center_x, center_y, depth_value_mm)
+                    if camera_coords_tuple:
+                        x_cam, y_cam, z_cam = camera_coords_tuple
+                        
+                        # 发布相机坐标
+                        camera_point_stamped = PointStamped()
+                        camera_point_stamped.header.stamp = rospy.Time.now()
+                        # 重要: 确保这个frame_id与您的相机光学坐标系frame_id一致
+                        # 通常可能是 'camera_color_optical_frame', 'camera_depth_optical_frame' 或类似名称
+                        camera_point_stamped.header.frame_id = "camera_color_optical_frame" 
+                        camera_point_stamped.point = Point(x_cam, y_cam, z_cam)
+                        self.camera_coords_pub.publish(camera_point_stamped)
+                        rospy.loginfo(f"目标在相机坐标系下: x={x_cam:.2f}, y={y_cam:.2f}, z={z_cam:.2f}")
+
+                        # 将相机坐标转换为列表，用于transform_to_world
+                        self.camera_coords = [x_cam, y_cam, z_cam] 
+
+                        # 调用transform_to_world获取世界坐标
+                        world_point_stamped = self.transform_to_world(self.camera_coords)
+                        if world_point_stamped:
+                            self.world_coords_pub.publish(world_point_stamped)
+                            rospy.loginfo(f"目标在世界坐标系下: x={world_point_stamped.point.x:.2f}, y={world_point_stamped.point.y:.2f}, z={world_point_stamped.point.z:.2f}")
+                        else:
+                            rospy.logwarn("无法将相机坐标转换为世界坐标")
+                    else:
+                        rospy.logwarn("无法从像素坐标计算相机坐标")
                 else:
                     depth_text = "Depth: 0mm (Invalid)"
             else:
@@ -231,7 +259,7 @@ class ColorDetection:
         self.num += 1
         
         # 显示结果
-        cv2.imshow("Red Object Detection", color_frame)
+        # cv2.imshow("Red Object Detection", color_frame)
         
         # 保存图片（可选，创建imgs文件夹）
         # try:
@@ -255,7 +283,7 @@ if __name__ == '__main__':
     try:
         # 创建红色检测实例
         detector = ColorDetection()
-        
+        camera_coords = detector
         # 保持节点运行
         rospy.spin()
         
