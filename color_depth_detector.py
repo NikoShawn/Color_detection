@@ -17,8 +17,11 @@ class ColorDetection:
         self.bridge = CvBridge()
         
         # 红色范围定义
-        self.lower_red = np.array([156, 100, 100])     # 红色范围低阈值
+        self.lower_red = np.array([165, 100, 100])     # 红色范围低阈值
         self.upper_red = np.array([180, 255, 255])    # 红色范围高阈值
+
+        # self.lower_red = np.array([85, 100, 100])     # 红色范围低阈值
+        # self.upper_red = np.array([105, 255, 255])    # 红色范围高阈值
         
         # 字体设置
         self.font = cv2.FONT_HERSHEY_SIMPLEX
@@ -46,6 +49,8 @@ class ColorDetection:
         # 添加发布器
         self.camera_coords_pub = rospy.Publisher('/target_obs', PointStamped, queue_size=10)
         self.world_coords_pub = rospy.Publisher('/target_pos', PointStamped, queue_size=10)
+        # 新增：发布处理后的彩色图像
+        self.processed_image_pub = rospy.Publisher('/processed_color_image', Image, queue_size=10)
         
         # 相机内参变量
         self.fx = None
@@ -195,7 +200,7 @@ class ColorDetection:
         
         for cnt in contours_red:
             area = cv2.contourArea(cnt)
-            if area > 1000 and area > max_area:  # 过滤掉太小的区域并找到最大面积
+            if area > 100 and area > max_area:  # 过滤掉太小的区域并找到最大面积
                 max_area = area
                 largest_contour = cnt
         
@@ -219,7 +224,7 @@ class ColorDetection:
                 if depth_value_mm > 0:
                     depth_value_m = depth_value_mm / 1000.0  # 转换为米
                     depth_text = f"Depth: {depth_value_m:.2f}m"
-
+                    rospy.loginfo(f"检测到红色物体，深度值: {depth_value_mm}mm ({depth_value_m:.2f}m)")
                     # 调用pixel_to_3d获取相机坐标
                     camera_coords_tuple = self.pixel_to_3d(center_x, center_y, depth_value_mm)
                     if camera_coords_tuple:
@@ -233,7 +238,7 @@ class ColorDetection:
                         camera_point_stamped.header.frame_id = "camera_color_optical_frame" 
                         camera_point_stamped.point = Point(x_cam, y_cam, z_cam)
                         self.camera_coords_pub.publish(camera_point_stamped)
-                        rospy.loginfo(f"目标在相机坐标系下: x={x_cam:.2f}, y={y_cam:.2f}, z={z_cam:.2f}")
+                        # rospy.loginfo(f"目标在相机坐标系下: x={x_cam:.2f}, y={y_cam:.2f}, z={z_cam:.2f}")
 
                         # 将相机坐标转换为列表，用于transform_to_world
                         self.camera_coords = [x_cam, y_cam, z_cam] 
@@ -242,7 +247,7 @@ class ColorDetection:
                         world_point_stamped = self.transform_to_world(self.camera_coords)
                         if world_point_stamped:
                             self.world_coords_pub.publish(world_point_stamped)
-                            rospy.loginfo(f"目标在世界坐标系下: x={world_point_stamped.point.x:.2f}, y={world_point_stamped.point.y:.2f}, z={world_point_stamped.point.z:.2f}")
+                            # rospy.loginfo(f"目标在世界坐标系下: x={world_point_stamped.point.x:.2f}, y={world_point_stamped.point.y:.2f}, z={world_point_stamped.point.z:.2f}")
                         else:
                             rospy.logwarn("无法将相机坐标转换为世界坐标")
                     else:
@@ -254,6 +259,15 @@ class ColorDetection:
 
             cv2.putText(color_frame, f"Red (Area: {int(max_area)})", (x, y - 25), self.font, 0.7, (0, 0, 255), 2)
             cv2.putText(color_frame, depth_text, (x, y - 5), self.font, 0.7, (0, 255, 0), 2) # 显示深度信息
+            
+        # 新增：发布处理后的彩色图像作为ROS话题
+        try:
+            processed_image_msg = self.bridge.cv2_to_imgmsg(color_frame, "bgr8")
+            processed_image_msg.header.stamp = rospy.Time.now()
+            processed_image_msg.header.frame_id = "camera_color_optical_frame"
+            self.processed_image_pub.publish(processed_image_msg)
+        except CvBridgeError as e:
+            rospy.logerr(f"发布处理后图像时出错: {e}")
         
         # 更新图片计数器
         self.num += 1
@@ -264,6 +278,7 @@ class ColorDetection:
         # 保存图片（可选，创建imgs文件夹）
         # try:
         #     cv2.imwrite(f"imgs/{self.num}.jpg", color_frame)
+        #     rospy.loginfo(f"保存图片: imgs/{self.num}.jpg")
         # except:
         #     pass  # 如果imgs文件夹不存在，跳过保存
         
