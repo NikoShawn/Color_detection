@@ -23,6 +23,10 @@ class ColorDetection:
         # self.lower_red = np.array([85, 100, 100])     # 红色范围低阈值
         # self.upper_red = np.array([105, 255, 255])    # 红色范围高阈值
         
+        # 深蓝色范围选项2 - 包含海军蓝
+        self.lower_blue = np.array([100, 100, 30])     
+        self.upper_blue = np.array([125, 255, 120])  
+        
         # 字体设置
         self.font = cv2.FONT_HERSHEY_SIMPLEX
         
@@ -46,9 +50,12 @@ class ColorDetection:
         # 订阅相机内参
         self.camera_info_sub = rospy.Subscriber('/camera/color/camera_info', CameraInfo, self.camera_info_callback)
         
-        # 添加发布器
+        # 添加发布器 - 红色目标
         self.camera_coords_pub = rospy.Publisher('/target_obs', PointStamped, queue_size=10)
         self.world_coords_pub = rospy.Publisher('/target_pos', PointStamped, queue_size=10)
+        # 添加发布器 - 蓝色目标
+        self.blue_camera_coords_pub = rospy.Publisher('/teamate_obs', PointStamped, queue_size=10)
+        self.blue_world_coords_pub = rospy.Publisher('/teamate_pos', PointStamped, queue_size=10)
         # 新增：发布处理后的彩色图像
         self.processed_image_pub = rospy.Publisher('/processed_color_image', Image, queue_size=10)
         
@@ -61,6 +68,7 @@ class ColorDetection:
         
         # 添加相机坐标存储变量
         self.camera_coords = None
+        self.blue_camera_coords = None
 
         # 订阅机械犬里程计
         self.odom_sub = rospy.Subscriber('/Odometry', Odometry, self.odom_callback)
@@ -181,32 +189,37 @@ class ColorDetection:
         return x, y, z
 
     def process_frame_and_depth(self, color_frame, depth_frame): # 修改函数名并增加 depth_frame 参数
-        """处理单帧图像进行红色检测并获取深度信息"""
+        """处理单帧图像进行红色和蓝色检测并获取深度信息"""
         # 转换为HSV颜色空间
         hsv_img = cv2.cvtColor(color_frame, cv2.COLOR_BGR2HSV)
         
         # 根据红色范围创建掩码
         mask_red = cv2.inRange(hsv_img, self.lower_red, self.upper_red)
+        # 根据蓝色范围创建掩码
+        mask_blue = cv2.inRange(hsv_img, self.lower_blue, self.upper_blue)
         
         # 中值滤波去噪
         mask_red = cv2.medianBlur(mask_red, 7)
+        mask_blue = cv2.medianBlur(mask_blue, 7)
         
-        # 查找轮廓
+        # 查找红色轮廓
         contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        # 查找蓝色轮廓
+        contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         
-        # 找到面积最大的红色物体
-        max_area = 0
-        largest_contour = None
+        # 处理红色检测
+        max_red_area = 0
+        largest_red_contour = None
         
         for cnt in contours_red:
             area = cv2.contourArea(cnt)
-            if area > 100 and area > max_area:  # 过滤掉太小的区域并找到最大面积
-                max_area = area
-                largest_contour = cnt
+            if area > 100 and area > max_red_area:  # 过滤掉太小的区域并找到最大面积
+                max_red_area = area
+                largest_red_contour = cnt
         
         # 只绘制面积最大的红色物体检测框并获取深度
-        if largest_contour is not None:
-            (x, y, w, h) = cv2.boundingRect(largest_contour)
+        if largest_red_contour is not None:
+            (x, y, w, h) = cv2.boundingRect(largest_red_contour)
             cv2.rectangle(color_frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
             
             # 计算检测框中心点
@@ -257,8 +270,72 @@ class ColorDetection:
             else:
                 depth_text = "Depth: OOB" # Out of Bounds
 
-            cv2.putText(color_frame, f"Red (Area: {int(max_area)})", (x, y - 25), self.font, 0.7, (0, 0, 255), 2)
+            cv2.putText(color_frame, f"Red (Area: {int(max_red_area)})", (x, y - 25), self.font, 0.7, (0, 0, 255), 2)
             cv2.putText(color_frame, depth_text, (x, y - 5), self.font, 0.7, (0, 255, 0), 2) # 显示深度信息
+        
+        # 处理蓝色检测
+        max_blue_area = 0
+        largest_blue_contour = None
+        
+        for cnt in contours_blue:
+            area = cv2.contourArea(cnt)
+            if area > 100 and area > max_blue_area:  # 过滤掉太小的区域并找到最大面积
+                max_blue_area = area
+                largest_blue_contour = cnt
+        
+        # 只绘制面积最大的蓝色物体检测框并获取深度
+        if largest_blue_contour is not None:
+            (x, y, w, h) = cv2.boundingRect(largest_blue_contour)
+            cv2.rectangle(color_frame, (x, y), (x + w, y + h), (255, 255, 0), 2)  # 青色框
+            
+            # 计算检测框中心点
+            center_x = x + w // 2
+            center_y = y + h // 2
+            cv2.circle(color_frame, (center_x, center_y), 5, (255, 0, 255), -1)  # 紫色中心点
+
+            depth_value_mm = 0
+            depth_text = "Depth: N/A"
+            # 确保中心点在深度图像的有效范围内
+            if 0 <= center_y < depth_frame.shape[0] and 0 <= center_x < depth_frame.shape[1]:
+                depth_value_mm = depth_frame[center_y, center_x]
+                
+                # 检查深度值是否有效（通常0表示无效深度）
+                if depth_value_mm > 0:
+                    depth_value_m = depth_value_mm / 1000.0  # 转换为米
+                    depth_text = f"Depth: {depth_value_m:.2f}m"
+                    rospy.loginfo(f"检测到蓝色物体，深度值: {depth_value_mm}mm ({depth_value_m:.2f}m)")
+                    # 调用pixel_to_3d获取相机坐标
+                    blue_camera_coords_tuple = self.pixel_to_3d(center_x, center_y, depth_value_mm)
+                    if blue_camera_coords_tuple:
+                        x_cam, y_cam, z_cam = blue_camera_coords_tuple
+                        
+                        # 发布蓝色目标的相机坐标
+                        blue_camera_point_stamped = PointStamped()
+                        blue_camera_point_stamped.header.stamp = rospy.Time.now()
+                        blue_camera_point_stamped.header.frame_id = "camera_color_optical_frame" 
+                        blue_camera_point_stamped.point = Point(x_cam, y_cam, z_cam)
+                        self.blue_camera_coords_pub.publish(blue_camera_point_stamped)
+                        # rospy.loginfo(f"蓝色目标在相机坐标系下: x={x_cam:.2f}, y={y_cam:.2f}, z={z_cam:.2f}")
+
+                        # 将相机坐标转换为列表，用于transform_to_world
+                        self.blue_camera_coords = [x_cam, y_cam, z_cam] 
+
+                        # 调用transform_to_world获取世界坐标
+                        blue_world_point_stamped = self.transform_to_world(self.blue_camera_coords)
+                        if blue_world_point_stamped:
+                            self.blue_world_coords_pub.publish(blue_world_point_stamped)
+                            # rospy.loginfo(f"蓝色目标在世界坐标系下: x={blue_world_point_stamped.point.x:.2f}, y={blue_world_point_stamped.point.y:.2f}, z={blue_world_point_stamped.point.z:.2f}")
+                        else:
+                            rospy.logwarn("无法将蓝色目标的相机坐标转换为世界坐标")
+                    else:
+                        rospy.logwarn("无法从蓝色目标的像素坐标计算相机坐标")
+                else:
+                    depth_text = "Depth: 0mm (Invalid)"
+            else:
+                depth_text = "Depth: OOB" # Out of Bounds
+
+            cv2.putText(color_frame, f"Blue (Area: {int(max_blue_area)})", (x, y - 25), self.font, 0.7, (255, 0, 0), 2)
+            cv2.putText(color_frame, depth_text, (x, y - 5), self.font, 0.7, (0, 255, 255), 2) # 显示深度信息
             
         # 新增：发布处理后的彩色图像作为ROS话题
         try:
