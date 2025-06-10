@@ -396,7 +396,7 @@ class ColorDetection:
             center_y = y + h // 2
             cv2.circle(color_frame, (center_x, center_y), 5, (255, 0, 255), -1)  # 紫色中心点
 
-            depth_value_mm = 0 
+            depth_value_mm = 0   
             depth_text = "Depth: N/A"
             # 确保中心点在深度图像的有效范围内
             if 0 <= center_y < depth_frame.shape[0] and 0 <= center_x < depth_frame.shape[1]:
