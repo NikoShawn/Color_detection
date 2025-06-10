@@ -170,10 +170,6 @@ class PersonDetector:
         self.person_points_pub = rospy.Publisher('/person_points', PointCloud2, queue_size=1)
         self.tracks_pub = rospy.Publisher('/tracked_persons', MarkerArray, queue_size=1)
         
-        # 新增：发布人体位置和速度信息
-        from std_msgs.msg import String
-        self.person_data_pub = rospy.Publisher('/person_tracking_data', String, queue_size=1)
-        
         self.imu_data = None
         self.yaw = 0.0
         
@@ -225,7 +221,7 @@ class PersonDetector:
         return points[mask]
     
     def detect_persons(self, points):
-        """使用DBSCAN识别人体"""
+        """使用DBSCAN识别人体，最多识别2个人"""
         # 仅使用空间坐标(x,y,z)进行聚类
         X = points[:, :3]
         
@@ -241,6 +237,10 @@ class PersonDetector:
             # 忽略噪声点（标签为-1）
             if label == -1:
                 continue
+            
+            # 如果已经检测到2个人，停止处理更多的簇
+            if len(person_clusters) >= 2:
+                break
                 
             # 获取当前簇的所有点
             cluster_points = points[labels == label]
@@ -255,6 +255,12 @@ class PersonDetector:
                 # 判断高度是否符合人体特征（0.8m到2.0m之间）
                 if 0.8 <= height <= 2.0:
                     person_clusters.append(cluster_points)
+        
+        # 如果检测到超过2个人，选择最大的2个簇
+        if len(person_clusters) > 2:
+            # 按点的数量排序，选择最大的2个
+            person_clusters.sort(key=len, reverse=True)
+            person_clusters = person_clusters[:2]
         
         return person_clusters
     
@@ -299,13 +305,16 @@ class PersonDetector:
         return matched_indices, unmatched_detections, unmatched_tracks
     
     def reassign_track_ids(self):
-        """重新分配Track ID，使其表示当前人数"""
+        """重新分配Track ID，使其表示当前人数，最多2个人"""
         valid_trackers = [t for t in self.trackers if t.is_valid()]
+        # 限制最多2个有效跟踪器
+        valid_trackers = valid_trackers[:2]
+        
         for i, tracker in enumerate(valid_trackers):
-            tracker.track_id = i + 1  # ID从1开始
+            tracker.track_id = i + 1  # ID从1开始，最多到2
     
     def update_trackers(self, detections):
-        """更新跟踪器"""
+        """更新跟踪器，最多跟踪2个人"""
         # 关联检测结果到轨迹
         matched, unmatched_dets, unmatched_tracks = self.associate_detections_to_tracks(detections)
         
@@ -318,14 +327,31 @@ class PersonDetector:
         for track_idx in unmatched_tracks:
             self.trackers[track_idx].miss()
         
-        # 为未匹配的检测创建新轨迹（初始ID为0，稍后重新分配）
+        # 为未匹配的检测创建新轨迹，但最多只能有2个跟踪器
+        current_valid_trackers = len([t for t in self.trackers if not t.should_delete()])
+        
         for det_idx in unmatched_dets:
+            if current_valid_trackers >= 2:
+                break  # 已经达到最大跟踪数量，停止创建新轨迹
+            
             centroid = np.mean(detections[det_idx][:, :3], axis=0)
             new_tracker = PersonTracker(0, centroid)  # 临时ID
             self.trackers.append(new_tracker)
+            current_valid_trackers += 1
         
         # 移除应该删除的轨迹
         self.trackers = [t for t in self.trackers if not t.should_delete()]
+        
+        # 如果跟踪器数量超过2个，保留最稳定的2个
+        valid_trackers = [t for t in self.trackers if t.is_valid()]
+        if len(valid_trackers) > 2:
+            # 按hits数量排序，保留最稳定的2个
+            valid_trackers.sort(key=lambda x: x.hits, reverse=True)
+            # 移除多余的跟踪器
+            trackers_to_remove = valid_trackers[2:]
+            for tracker in trackers_to_remove:
+                if tracker in self.trackers:
+                    self.trackers.remove(tracker)
         
         # 重新分配ID，使其表示当前人数
         self.reassign_track_ids()
@@ -361,56 +387,22 @@ class PersonDetector:
     
     def publish_tracking_data(self):
         """发布跟踪数据"""
-        import json
-        
         # 准备发布数据
         valid_trackers = [t for t in self.trackers if t.is_valid()]
-        publish_data = {
-            'timestamp': rospy.Time.now().to_sec(),
-            'frame_id': 'livox_frame',
-            'total_persons': len(valid_trackers),  # 当前检测到的人数
-            'tracks': []
-        }
-        
-        for tracker in valid_trackers:
-            position = tracker.kalman.get_position()
-            velocity = tracker.kalman.get_velocity()
-            speed = np.linalg.norm(velocity)
-            
-            track_data = {
-                'track_id': tracker.track_id,  # ID现在表示第几个人(1,2,3...)
-                'position': {
-                    'x': float(position[0]),
-                    'y': float(position[1]),
-                    'z': float(position[2])
-                },
-                'velocity': {
-                    'x': float(velocity[0]),
-                    'y': float(velocity[1]),
-                    'z': float(velocity[2])
-                },
-                'speed': float(speed),
-                'age': tracker.age,
-                'hits': tracker.hits,
-                'last_seen': tracker.last_seen.to_sec()
-            }
-            publish_data['tracks'].append(track_data)
-        
-        # 发布JSON格式的数据
-        from std_msgs.msg import String
-        json_msg = String()
-        json_msg.data = json.dumps(publish_data, indent=2)
-        self.person_data_pub.publish(json_msg)
         
         # 打印跟踪信息到控制台
-        if publish_data['tracks']:
-            rospy.loginfo("当前检测到 %d 个人:", publish_data['total_persons'])
-            for track in publish_data['tracks']:
+        if valid_trackers:
+            rospy.loginfo("当前检测到 %d 个人:", len(valid_trackers))
+            for tracker in valid_trackers:
+                position = tracker.kalman.get_position()
+                velocity = tracker.kalman.get_velocity()
+                speed = np.linalg.norm(velocity)
+                
                 rospy.loginfo("  第 %d 个人: 位置(%.2f, %.2f, %.2f) 速度(%.2f, %.2f, %.2f) 速率%.2f m/s", 
-                             track['track_id'],
-                             track['position']['x'], track['position']['y'], track['position']['z'],
-                             track['velocity']['x'], track['velocity']['y'], track['velocity']['z'],
-                             track['speed'])
+                             tracker.track_id,
+                             position[0], position[1], position[2],
+                             velocity[0], velocity[1], velocity[2],
+                             speed)
     
     def publish_markers(self, clusters):
         """发布检测标记"""
