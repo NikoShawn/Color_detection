@@ -6,19 +6,19 @@ import cv2
 import numpy as np
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge, CvBridgeError
-import message_filters # 新增导入
+import message_filters
 from geometry_msgs.msg import PointStamped,TransformStamped,Point
 from tf.transformations import euler_from_quaternion
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Header  # 添加这行导入
+from std_msgs.msg import Header
 
 class ColorDetection:
     def __init__(self):
         self.bridge = CvBridge()
         
         # 红色范围定义
-        self.lower_red = np.array([156, 100, 100])     # 红色范围低阈值
-        self.upper_red = np.array([180, 255, 255])    # 红色范围高阈值
+        self.lower_red = np.array([156, 100, 100])
+        self.upper_red = np.array([180, 255, 255])
         
         # 字体设置
         self.font = cv2.FONT_HERSHEY_SIMPLEX
@@ -27,25 +27,23 @@ class ColorDetection:
         self.num = 0
         
         # 订阅颜色图像和深度图像话题
-        # self.color_sub = rospy.Subscriber('/camera/color/image_raw', Image, self.image_callback) # 旧的订阅方式
         self.color_sub = message_filters.Subscriber('/camera/color/image_raw', Image)
-        # 假设深度相机话题为 /camera/depth/image_rect_raw，请根据实际情况修改
         self.depth_sub = message_filters.Subscriber('/camera/aligned_depth_to_color/image_raw', Image) 
 
-        # 使用 ApproximateTimeSynchronizer 同步颜色和深度图像消息
+        # 优化1: 减小队列大小和时间差，增加处理频率
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.color_sub, self.depth_sub], 
-            queue_size=10, 
-            slop=0.1 # 允许消息之间最大0.1秒的时间差
+            queue_size=5,  # 减小队列大小，从10改为5
+            slop=0.05      # 减小时间差容忍度，从0.1改为0.05
         )
-        self.ts.registerCallback(self.synchronized_callback) # 注册新的同步回调函数
+        self.ts.registerCallback(self.synchronized_callback)
 
         # 订阅相机内参
         self.camera_info_sub = rospy.Subscriber('/camera/color/camera_info', CameraInfo, self.camera_info_callback)
         
         # 添加发布器
-        self.camera_coords_pub = rospy.Publisher('/target_obs', PointStamped, queue_size=10)
-        self.world_coords_pub = rospy.Publisher('/target_pos', PointStamped, queue_size=10)
+        self.camera_coords_pub = rospy.Publisher('/target_obs', PointStamped, queue_size=5)  # 减小队列
+        self.world_coords_pub = rospy.Publisher('/target_pos', PointStamped, queue_size=5)   # 减小队列
         
         # 相机内参变量
         self.fx = None
@@ -60,23 +58,32 @@ class ColorDetection:
         # 订阅机械犬里程计
         self.odom_sub = rospy.Subscriber('/Odometry', Odometry, self.odom_callback)
 
-        # rospy.loginfo("Waiting for initial odometry...")
-        # while not rospy.is_shutdown() and self.current_pose is None:
-        #     rospy.sleep(0.1)
-        # rospy.loginfo("Odometry ready!")
-
         # 当前位姿存储
         self.current_pose = None
         self.orientation = None
         self.position = None
+        
+        # 优化2: 添加处理频率控制
+        self.last_process_time = rospy.Time.now()
+        self.process_interval = rospy.Duration(0.02)  # 约30Hz，可调整
+        
+        # 优化3: 添加图像降采样标志
+        self.downsample_factor = 4  # 图像降采样因子，2表示宽高各缩小一半
+
+        # 添加帧跳过计数器
+        self.frame_skip_counter = 0
+        self.process_every_n_frames = 3  # 每3帧处理一次，约10Hz
 
     def synchronized_callback(self, color_msg, depth_msg):
         """处理接收到的同步颜色和深度图像消息"""
+        # 方法2: 每N帧处理一次
+        self.frame_skip_counter += 1
+        if self.frame_skip_counter < self.process_every_n_frames:
+            return
+        self.frame_skip_counter = 0
+        
         try:
-            # 将ROS Image消息转换为OpenCV图像
             color_frame = self.bridge.imgmsg_to_cv2(color_msg, "bgr8")
-            # 深度图像通常是16位无符号整数 (16UC1)，单位为毫米
-            # 或32位浮点数 (32FC1)，单位为米。请根据您的相机输出调整 "16UC1"
             depth_frame = self.bridge.imgmsg_to_cv2(depth_msg, "16UC1") 
         except CvBridgeError as e:
             rospy.logerr(f"CvBridge错误: {e}")
@@ -88,10 +95,6 @@ class ColorDetection:
     def camera_info_callback(self, msg):
         """处理相机内参回调"""
         if not self.camera_info_received:
-            # 提取相机内参矩阵的参数
-            # K = [fx  0 cx]
-            #     [ 0 fy cy]
-            #     [ 0  0  1]
             self.fx = msg.K[0]
             self.fy = msg.K[4]
             self.cx = msg.K[2]
@@ -114,37 +117,27 @@ class ColorDetection:
             self.current_pose.orientation.w
         ]
 
-
     def transform_to_world(self, camera_coords):
-        """
-        :param camera_coords: 机械犬基座坐标系下的三维坐标 [x,y,z] (list/numpy array)
-        :return: 世界坐标系下的PointStamped消息
-        """
+        """坐标转换函数"""
         if self.current_pose is None:
             rospy.logwarn("No odometry data received yet!")
             return None
 
         try:
-            # 提取机器人位姿
             robot_x = self.position[0]
             robot_y = self.position[1]
             robot_z = self.position[2]
 
-            # 从四元数提取偏航角(yaw)
             q = self.orientation
             roll, pitch, yaw = euler_from_quaternion([q[0], q[1], q[2], q[3]])
 
-            # 解析局部坐标（假设x为左侧，z为前方）
-            x_local = camera_coords[0]  # 左侧偏移
-            z_local = camera_coords[2]  # 前方距离
-            #y_local = camera_coords[1]  # 高度
+            x_local = camera_coords[0]
+            z_local = camera_coords[2]
 
-            # 执行二维坐标变换
             world_x = robot_x + z_local * np.cos(yaw) + x_local * np.sin(yaw)
             world_y = robot_y + z_local * np.sin(yaw) - x_local * np.cos(yaw)
             world_z = robot_z
 
-            # 封装为PointStamped
             result = PointStamped()
             result.header = Header()
             result.header.stamp = rospy.Time.now()
@@ -165,29 +158,45 @@ class ColorDetection:
         if depth <= 0:
             return None
         
-        # 深度值通常以毫米为单位，转换为米
         depth_m = depth / 1000.0
         
-        # 计算三维坐标 (相机光学坐标系)
         x = (u - self.cx) * depth_m / self.fx
         y = (v - self.cy) * depth_m / self.fy
         z = depth_m
         
         return x, y, z
 
-    def process_frame_and_depth(self, color_frame, depth_frame): # 修改函数名并增加 depth_frame 参数
+    def process_frame_and_depth(self, color_frame, depth_frame):
         """处理单帧图像进行红色检测并获取深度信息"""
+        # 优化5: 图像降采样以提高处理速度
+        if self.downsample_factor > 1:
+            height, width = color_frame.shape[:2]
+            new_width = width // self.downsample_factor
+            new_height = height // self.downsample_factor
+            
+            # 降采样图像
+            small_color = cv2.resize(color_frame, (new_width, new_height))
+            small_depth = cv2.resize(depth_frame, (new_width, new_height))
+            
+            # 相应调整内参
+            scale_x = new_width / width
+            scale_y = new_height / height
+        else:
+            small_color = color_frame
+            small_depth = depth_frame
+            scale_x = scale_y = 1.0
+        
         # 转换为HSV颜色空间
-        hsv_img = cv2.cvtColor(color_frame, cv2.COLOR_BGR2HSV)
+        hsv_img = cv2.cvtColor(small_color, cv2.COLOR_BGR2HSV)
         
         # 根据红色范围创建掩码
         mask_red = cv2.inRange(hsv_img, self.lower_red, self.upper_red)
         
-        # 中值滤波去噪
-        mask_red = cv2.medianBlur(mask_red, 7)
+        # 优化6: 减少滤波核大小
+        mask_red = cv2.medianBlur(mask_red, 5)  # 从7改为5
         
         # 查找轮廓
-        contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 使用SIMPLE近似
         
         # 找到面积最大的红色物体
         max_area = 0
@@ -195,81 +204,77 @@ class ColorDetection:
         
         for cnt in contours_red:
             area = cv2.contourArea(cnt)
-            if area > 1000 and area > max_area:  # 过滤掉太小的区域并找到最大面积
+            # 优化7: 根据降采样调整最小面积阈值
+            min_area = 1000 // (self.downsample_factor ** 2)
+            if area > min_area and area > max_area:
                 max_area = area
                 largest_contour = cnt
         
         # 只绘制面积最大的红色物体检测框并获取深度
         if largest_contour is not None:
             (x, y, w, h) = cv2.boundingRect(largest_contour)
+            
+            # 如果使用了降采样，需要将坐标映射回原图
+            if self.downsample_factor > 1:
+                x = int(x / scale_x)
+                y = int(y / scale_y)
+                w = int(w / scale_x)
+                h = int(h / scale_y)
+            
             cv2.rectangle(color_frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
             
-            # 计算检测框中心点
             center_x = x + w // 2
             center_y = y + h // 2
-            cv2.circle(color_frame, (center_x, center_y), 5, (255, 0, 0), -1) # 绘制中心点
+            cv2.circle(color_frame, (center_x, center_y), 5, (255, 0, 0), -1)
 
             depth_value_mm = 0
             depth_text = "Depth: N/A"
-            # 确保中心点在深度图像的有效范围内
+            
             if 0 <= center_y < depth_frame.shape[0] and 0 <= center_x < depth_frame.shape[1]:
                 depth_value_mm = depth_frame[center_y, center_x]
                 
-                # 检查深度值是否有效（通常0表示无效深度）
                 if depth_value_mm > 0:
-                    depth_value_m = depth_value_mm / 1000.0  # 转换为米
+                    depth_value_m = depth_value_mm / 1000.0
                     depth_text = f"Depth: {depth_value_m:.2f}m"
 
-                    # 调用pixel_to_3d获取相机坐标
                     camera_coords_tuple = self.pixel_to_3d(center_x, center_y, depth_value_mm)
                     if camera_coords_tuple:
                         x_cam, y_cam, z_cam = camera_coords_tuple
                         
-                        # 发布相机坐标
                         camera_point_stamped = PointStamped()
                         camera_point_stamped.header.stamp = rospy.Time.now()
-                        # 重要: 确保这个frame_id与您的相机光学坐标系frame_id一致
-                        # 通常可能是 'camera_color_optical_frame', 'camera_depth_optical_frame' 或类似名称
                         camera_point_stamped.header.frame_id = "camera_color_optical_frame" 
                         camera_point_stamped.point = Point(x_cam, y_cam, z_cam)
                         self.camera_coords_pub.publish(camera_point_stamped)
-                        rospy.loginfo(f"目标在相机坐标系下: x={x_cam:.2f}, y={y_cam:.2f}, z={z_cam:.2f}")
+                        
+                        # 优化8: 减少日志输出频率
+                        if self.num % 10 == 0:  # 每10帧输出一次日志
+                            rospy.loginfo(f"目标在相机坐标系下: x={x_cam:.2f}, y={y_cam:.2f}, z={z_cam:.2f}")
 
-                        # 将相机坐标转换为列表，用于transform_to_world
                         self.camera_coords = [x_cam, y_cam, z_cam] 
 
-                        # 调用transform_to_world获取世界坐标
                         world_point_stamped = self.transform_to_world(self.camera_coords)
                         if world_point_stamped:
                             self.world_coords_pub.publish(world_point_stamped)
-                            rospy.loginfo(f"目标在世界坐标系下: x={world_point_stamped.point.x:.2f}, y={world_point_stamped.point.y:.2f}, z={world_point_stamped.point.z:.2f}")
-                        else:
-                            rospy.logwarn("无法将相机坐标转换为世界坐标")
-                    else:
-                        rospy.logwarn("无法从像素坐标计算相机坐标")
+                            if self.num % 10 == 0:
+                                rospy.loginfo(f"目标在世界坐标系下: x={world_point_stamped.point.x:.2f}, y={world_point_stamped.point.y:.2f}, z={world_point_stamped.point.z:.2f}")
                 else:
                     depth_text = "Depth: 0mm (Invalid)"
             else:
-                depth_text = "Depth: OOB" # Out of Bounds
+                depth_text = "Depth: OOB"
 
-            cv2.putText(color_frame, f"Red (Area: {int(max_area)})", (x, y - 25), self.font, 0.7, (0, 0, 255), 2)
-            cv2.putText(color_frame, depth_text, (x, y - 5), self.font, 0.7, (0, 255, 0), 2) # 显示深度信息
+            cv2.putText(color_frame, f"Red (Area: {int(max_area * (self.downsample_factor ** 2))})", (x, y - 25), self.font, 0.7, (0, 0, 255), 2)
+            cv2.putText(color_frame, depth_text, (x, y - 5), self.font, 0.7, (0, 255, 0), 2)
         
-        # 更新图片计数器
         self.num += 1
         
-        # 显示结果
-        # cv2.imshow("Red Object Detection", color_frame)
+        # 优化9: 降低显示帧率
+        # if self.num % 2 == 0:  # 每2帧显示一次
+        #     cv2.imshow("Red Object Detection", color_frame)
         
-        # 保存图片（可选，创建imgs文件夹）
-        # try:
-        #     cv2.imwrite(f"imgs/{self.num}.jpg", color_frame)
-        # except:
-        #     pass  # 如果imgs文件夹不存在，跳过保存
-        
-        # 检查是否按下ESC键退出
+        # 优化10: 减少waitKey调用
         key = cv2.waitKey(1) & 0xFF
-        if key == 27:  # ESC键
+        if key == 27:
             rospy.signal_shutdown("用户按下ESC键退出")
 
     def cleanup(self):
@@ -277,14 +282,10 @@ class ColorDetection:
         cv2.destroyAllWindows()
 
 if __name__ == '__main__':
-    # 初始化ROS节点
     rospy.init_node('red_detection_node', anonymous=True)
     
     try:
-        # 创建红色检测实例
         detector = ColorDetection()
-        camera_coords = detector
-        # 保持节点运行
         rospy.spin()
         
     except rospy.ROSInterruptException:
@@ -292,6 +293,5 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         rospy.loginfo("收到键盘中断信号")
     finally:
-        # 清理资源
         cv2.destroyAllWindows()
         rospy.loginfo("红色检测节点已关闭")
