@@ -17,14 +17,17 @@ class ColorDetection:
         self.bridge = CvBridge()
         
         # 红色范围定义
-        self.lower_red = np.array([165, 100, 100])     # 红色范围低阈值
-        self.upper_red = np.array([180, 255, 255])    # 红色范围高阈值
+        # self.lower_red = np.array([165, 100, 100])     # 红色范围低阈值
+        # self.upper_red = np.array([180, 255, 255])    # 红色范围高阈值
 
         # self.lower_red = np.array([85, 100, 100])     # 红色范围低阈值
         # self.upper_red = np.array([105, 255, 255])    # 红色范围高阈值
         
+        self.lower_red = np.array([0, 140, 140])     # 红色范围低阈值
+        self.upper_red = np.array([10, 200, 200])    # 红色范围高阈值
+
         # 深蓝色范围选项2 - 包含海军蓝
-        self.lower_blue = np.array([100, 100, 30])     
+        self.lower_blue = np.array([124, 250, 100])     
         self.upper_blue = np.array([125, 255, 120])  
         
         # 字体设置
@@ -35,9 +38,9 @@ class ColorDetection:
         
         # 订阅颜色图像和深度图像话题
         # self.color_sub = rospy.Subscriber('/camera/color/image_raw', Image, self.image_callback) # 旧的订阅方式
-        self.color_sub = message_filters.Subscriber('/camera/color/image_raw', Image)
+        self.color_sub = message_filters.Subscriber('/cam_3/color/image_raw', Image)
         # 假设深度相机话题为 /camera/depth/image_rect_raw，请根据实际情况修改
-        self.depth_sub = message_filters.Subscriber('/camera/aligned_depth_to_color/image_raw', Image) 
+        self.depth_sub = message_filters.Subscriber('/cam_3/aligned_depth_to_color/image_raw', Image) 
 
         # 使用 ApproximateTimeSynchronizer 同步颜色和深度图像消息
         self.ts = message_filters.ApproximateTimeSynchronizer(
@@ -48,7 +51,7 @@ class ColorDetection:
         self.ts.registerCallback(self.synchronized_callback) # 注册新的同步回调函数
 
         # 订阅相机内参
-        self.camera_info_sub = rospy.Subscriber('/camera/color/camera_info', CameraInfo, self.camera_info_callback)
+        self.camera_info_sub = rospy.Subscriber('/cam_3/color/camera_info', CameraInfo, self.camera_info_callback)
         
         # 添加发布器 - 红色目标
         self.camera_coords_pub = rospy.Publisher('/target_obs', PointStamped, queue_size=10)
@@ -213,7 +216,7 @@ class ColorDetection:
         
         for cnt in contours_red:
             area = cv2.contourArea(cnt)
-            if area > 100 and area > max_red_area:  # 过滤掉太小的区域并找到最大面积
+            if area > 50 and area > max_red_area:  # 过滤掉太小的区域并找到最大面积
                 max_red_area = area
                 largest_red_contour = cnt
         

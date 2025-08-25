@@ -17,9 +17,12 @@ class ColorDetection:
         self.bridge = CvBridge()
         
         # 红色范围定义
-        self.lower_red = np.array([156, 100, 100])
-        self.upper_red = np.array([180, 255, 255])
+        # self.lower_red = np.array([156, 100, 100])
+        # self.upper_red = np.array([180, 255, 255])
         
+        self.lower_red = np.array([0, 150, 150])     # 红色范围低阈值
+        self.upper_red = np.array([10, 180, 180])    # 红色范围高阈值
+
         # 字体设置
         self.font = cv2.FONT_HERSHEY_SIMPLEX
         
@@ -27,8 +30,8 @@ class ColorDetection:
         self.num = 0
         
         # 订阅颜色图像和深度图像话题
-        self.color_sub = message_filters.Subscriber('/camera/color/image_raw', Image)
-        self.depth_sub = message_filters.Subscriber('/camera/aligned_depth_to_color/image_raw', Image) 
+        self.color_sub = message_filters.Subscriber('/cam_3/color/image_raw', Image)
+        self.depth_sub = message_filters.Subscriber('/cam_3/aligned_depth_to_color/image_raw', Image) 
 
         # 优化1: 减小队列大小和时间差，增加处理频率
         self.ts = message_filters.ApproximateTimeSynchronizer(
@@ -39,7 +42,7 @@ class ColorDetection:
         self.ts.registerCallback(self.synchronized_callback)
 
         # 订阅相机内参
-        self.camera_info_sub = rospy.Subscriber('/camera/color/camera_info', CameraInfo, self.camera_info_callback)
+        self.camera_info_sub = rospy.Subscriber('/cam_3/color/camera_info', CameraInfo, self.camera_info_callback)
         
         # 添加发布器
         self.camera_coords_pub = rospy.Publisher('/target_obs', PointStamped, queue_size=5)  # 减小队列

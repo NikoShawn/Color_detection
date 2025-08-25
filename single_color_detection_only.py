@@ -14,8 +14,8 @@ class ColorDetection:
         self.bridge = CvBridge()
         
         # 红色范围定义
-        self.lower_red = np.array([165, 100, 100])     # 红色范围低阈值
-        self.upper_red = np.array([180, 255, 255])    # 红色范围高阈值
+        self.lower_red = np.array([0, 150, 150])     # 红色范围低阈值
+        self.upper_red = np.array([10, 180, 180])    # 红色范围高阈值
         
         # 字体设置
         self.font = cv2.FONT_HERSHEY_SIMPLEX
@@ -24,7 +24,7 @@ class ColorDetection:
         self.num = 0
         
         # 订阅彩色图像话题
-        self.color_sub = rospy.Subscriber('/camera/color/image_raw', Image, self.image_callback)
+        self.color_sub = rospy.Subscriber('/cam_3/color/image_raw', Image, self.image_callback)
         
         # 添加发布器 - 红色目标检测结果
         self.detection_pub = rospy.Publisher('/red_person_detection', PointStamped, queue_size=10)
@@ -64,7 +64,7 @@ class ColorDetection:
         
         for cnt in contours_red:
             area = cv2.contourArea(cnt)
-            if area > 100 and area > max_red_area:  # 过滤掉太小的区域并找到最大面积
+            if area > 50 and area > max_red_area:  # 过滤掉太小的区域并找到最大面积
                 max_red_area = area
                 largest_red_contour = cnt
         
